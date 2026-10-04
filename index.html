@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plant Identifier</title>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+<style>
+  :root { --paper:#eef2f5; --ink:#14213d; --muted:#5b6b82; --line:#c9d3de; --teal:#1b7f79; --sun:#f2c14e; --err:#b3261e; }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; background:var(--paper); color:var(--ink); font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; line-height:1.5; display:grid; place-items:center; padding:24px; }
+  main { width:100%; max-width:560px; }
+  h1 { font-size:clamp(2rem,7vw,3rem); line-height:1.05; margin:0 0 8px; font-weight:800; letter-spacing:-.02em; }
+  .sub { color:var(--muted); margin:0 0 24px; }
+  .drop { display:block; position:relative; border:2px dashed var(--ink); border-radius:6px; background:#fff; min-height:260px; cursor:pointer; overflow:hidden; }
+  .drop:hover, .drop.over { background:#fff8e1; border-color:var(--teal); }
+  .drop:focus-within { outline:3px solid var(--teal); outline-offset:3px; }
+  .drop input { position:absolute; opacity:0; inset:0; cursor:pointer; }
+  .hint { position:absolute; inset:0; display:grid; place-content:center; text-align:center; padding:20px; }
+  .hint strong { font-size:1.25rem; } .hint span { color:var(--muted); }
+  .drop img { display:none; width:100%; max-height:420px; object-fit:contain; }
+  .drop.has-image .hint { display:none; } .drop.has-image img { display:block; }
+  .result { margin-top:24px; min-height:110px; }
+  .status { color:var(--muted); } .status.err { color:var(--err); font-weight:600; }
+  .answer { font-size:clamp(1.8rem,6vw,2.6rem); font-weight:800; margin:0; text-transform:capitalize; letter-spacing:-.02em; }
+  .answer small { display:block; font-size:1rem; font-weight:400; color:var(--muted); text-transform:none; letter-spacing:0; }
+  .bars { list-style:none; padding:0; margin:16px 0 0; display:grid; gap:10px; }
+  .bars li { display:grid; grid-template-columns:7.5rem 1fr 3.5rem; align-items:center; gap:10px; font-size:.95rem; }
+  .name { text-transform:capitalize; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .track { height:10px; background:var(--line); border-radius:5px; overflow:hidden; }
+  .fill { height:100%; width:0; background:var(--teal); border-radius:5px; transition:width .5s ease; }
+  .bars li:first-child .fill { background:var(--sun); }
+  .pct { text-align:right; font-variant-numeric:tabular-nums; }
+  .note { margin-top:28px; font-size:.85rem; color:var(--muted); }
+  @media (prefers-reduced-motion: reduce) { .fill { transition:none; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Plant Identifier</h1>
+  <p class="sub">Upload a clear photo of a single plant or its leaves. It can identify: <span id="list">loading…</span>.</p>
+
+  <label class="drop" id="drop">
+    <input type="file" id="file" accept="image/*" disabled>
+    <div class="hint"><strong>Drop a plant photo here</strong><span>or click to choose one</span></div>
+    <img id="preview" alt="Your selected photo">
+  </label>
+
+  <section class="result" id="result" aria-live="polite"><p class="status">Loading the model…</p></section>
+
+  <p class="note">Tips: use good lighting, fill the frame, avoid blurry photos. Student project, so it can make mistakes. It only knows the plants listed above, and look-alikes such as ginger, galangal and curcuma are sometimes confused. Your photo stays on your device.</p>
+</main>
+
+<script>
+  const MODEL_URL = "plant_tfjs/model.json";
+  const LABELS_URL = "plant_tfjs/labels.json";
+  const SIZE = 128;
+  const DISPLAY = { aloevera:"aloe vera", longbeans:"long beans", "peper chili":"pepper chili", waterapple:"water apple" };
+  const nice = n => DISPLAY[n] || n;
+
+  const drop = document.getElementById("drop"), input = document.getElementById("file");
+  const preview = document.getElementById("preview"), result = document.getElementById("result");
+  let model, labels;
+
+  function setStatus(text, isErr) {
+    result.innerHTML = "";
+    const p = document.createElement("p");
+    p.className = "status" + (isErr ? " err" : "");
+    p.textContent = text;
+    result.appendChild(p);
+  }
+
+  async function init() {
+    try {
+      const loaded = await Promise.all([tf.loadGraphModel(MODEL_URL), fetch(LABELS_URL).then(r => r.json())]);
+      model = loaded[0]; labels = loaded[1];
+      document.getElementById("list").textContent = labels.map(nice).join(", ");
+      tf.tidy(() => model.predict(tf.zeros([1, SIZE, SIZE, 3])));   // warm-up run
+      input.disabled = false;
+      setStatus("Ready. Choose a photo.");
+    } catch (e) {
+      console.error(e);
+      setStatus("The model could not be loaded. Please try again later.", true);
+    }
+  }
+
+  async function handle(file) {
+    if (!model) return;
+    if (!file.type.startsWith("image/")) { setStatus("Please choose an image file (JPG, PNG or WebP).", true); return; }
+    setStatus("Looking at the photo…");
+    try {
+      preview.src = URL.createObjectURL(file);
+      drop.classList.add("has-image");
+      await preview.decode();
+      const probs = tf.tidy(() => {
+        const x = tf.image.resizeBilinear(tf.browser.fromPixels(preview), [SIZE, SIZE]).expandDims(0);
+        let out = model.predict(x);
+        if (Array.isArray(out)) out = out[0];
+        return Array.from(out.dataSync());
+      });
+      const top = probs.map((p, i) => ({ label: labels[i], p })).sort((a, b) => b.p - a.p).slice(0, 3);
+      show(top);
+    } catch (e) {
+      console.error(e);
+      setStatus("That image could not be read. Try another one.", true);
+    }
+  }
+
+  function show(top) {
+    result.innerHTML = "";
+    const h = document.createElement("p");
+    h.className = "answer";
+    h.textContent = nice(top[0].label);
+    const small = document.createElement("small");
+    small.textContent = "The model is " + Math.round(top[0].p * 100) + "% sure";
+    h.appendChild(small);
+    const ul = document.createElement("ul");
+    ul.className = "bars";
+    top.forEach(t => {
+      const li = document.createElement("li");
+      li.innerHTML = '<span class="name"></span><div class="track"><div class="fill"></div></div><span class="pct"></span>';
+      li.querySelector(".name").textContent = nice(t.label);
+      li.querySelector(".pct").textContent = (t.p * 100).toFixed(1) + "%";
+      ul.appendChild(li);
+      requestAnimationFrame(() => requestAnimationFrame(() => { li.querySelector(".fill").style.width = (t.p * 100) + "%"; }));
+    });
+    result.append(h, ul);
+  }
+
+  ["dragenter", "dragover"].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.add("over"); }));
+  ["dragleave", "drop"].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.remove("over"); }));
+  drop.addEventListener("drop", ev => { if (ev.dataTransfer.files[0]) handle(ev.dataTransfer.files[0]); });
+  input.addEventListener("change", () => { if (input.files[0]) handle(input.files[0]); });
+
+  init();
+</script>
+</body>
+</html>
